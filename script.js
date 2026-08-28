@@ -43,15 +43,26 @@ let currentCalculatedQuote = null;
 let isServerOnline = false;
 
 // =========================================================================
-// INDEXEDDB HELPER FOR 3D FILE STORAGE (GITHUB PAGES / LOCAL FALLBACK)
+// 3D FILE STORAGE (BASE64 + INDEXEDDB HYBRID)
 // =========================================================================
 
-const IDB_NAME = "PrintPrice3DDB";
+let currentUploadedFileBase64 = null;
+
+function fileToDataURL(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = (e) => reject(e);
+        reader.readAsDataURL(file);
+    });
+}
+
+const IDB_NAME = "PrintPrice3DDB_v2";
 const IDB_STORE = "model_files";
 
 function openIndexedDB() {
     return new Promise((resolve, reject) => {
-        const req = indexedDB.open(IDB_NAME, 1);
+        const req = indexedDB.open(IDB_NAME, 2);
         req.onupgradeneeded = (e) => {
             const db = e.target.result;
             if (!db.objectStoreNames.contains(IDB_STORE)) {
@@ -63,7 +74,18 @@ function openIndexedDB() {
     });
 }
 
-async function save3DFileLocally(quoteId, file) {
+async function save3DFileLocally(quoteId, file, base64) {
+    // 1. Try LocalStorage Base64 first
+    if (base64) {
+        try {
+            localStorage.setItem("printprice_file_" + quoteId, base64);
+            localStorage.setItem("printprice_filename_" + quoteId, file.name);
+        } catch (e) {
+            console.warn("LocalStorage full, saving to IndexedDB...");
+        }
+    }
+
+    // 2. Also save in IndexedDB
     try {
         const db = await openIndexedDB();
         const tx = db.transaction(IDB_STORE, "readwrite");
@@ -100,6 +122,10 @@ async function get3DFileLocally(quoteId) {
 }
 
 async function delete3DFileLocally(quoteId) {
+    try {
+        localStorage.removeItem("printprice_file_" + quoteId);
+        localStorage.removeItem("printprice_filename_" + quoteId);
+    } catch (e) {}
     try {
         const db = await openIndexedDB();
         const tx = db.transaction(IDB_STORE, "readwrite");
@@ -340,6 +366,14 @@ async function handleFileSelect(file) {
         currentUploadedFile = file;
         current3DMetrics = metrics;
 
+        try {
+            currentUploadedFileBase64 = await fileToDataURL(file);
+            localStorage.setItem("printprice_last_file_data", currentUploadedFileBase64);
+            localStorage.setItem("printprice_last_file_name", file.name);
+        } catch (e) {
+            console.warn("Could not encode file to base64:", e);
+        }
+
         // Update Dropzone UI
         document.querySelector(".dropzone-content").style.display = "none";
         const dropzoneLoaded = document.getElementById("dropzoneLoaded");
@@ -494,8 +528,8 @@ async function submitCustomerQuote() {
     window._cached3DFiles = window._cached3DFiles || {};
     window._cached3DFiles[quoteId] = currentUploadedFile;
 
-    // 1. Always save 3D file locally in IndexedDB as well for instant download
-    await save3DFileLocally(quoteId, currentUploadedFile);
+    // 1. Always save 3D file locally in LocalStorage (Base64) & IndexedDB for instant download
+    await save3DFileLocally(quoteId, currentUploadedFile, currentUploadedFileBase64);
 
     // 2. Try submitting to backend API if available
     try {
@@ -753,7 +787,21 @@ async function trigger3DFileDownload(quoteId, storedFile, fileName) {
         return;
     }
 
-    // 2. In-memory cache download
+    // 2. Direct LocalStorage Base64 download (instant & persists across refreshes!)
+    const localBase64 = localStorage.getItem("printprice_file_" + quoteId) || 
+        (localStorage.getItem("printprice_last_file_name") === fileName ? localStorage.getItem("printprice_last_file_data") : null);
+
+    if (localBase64) {
+        const a = document.createElement("a");
+        a.href = localBase64;
+        a.download = fileName || "model.obj";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        return;
+    }
+
+    // 3. In-memory cache download
     if (window._cached3DFiles && window._cached3DFiles[quoteId]) {
         const file = window._cached3DFiles[quoteId];
         const url = URL.createObjectURL(file);
@@ -767,7 +815,7 @@ async function trigger3DFileDownload(quoteId, storedFile, fileName) {
         return;
     }
 
-    // 3. Retrieve from IndexedDB
+    // 4. Retrieve from IndexedDB
     const record = await get3DFileLocally(quoteId);
     if (record && record.data) {
         const blob = new Blob([record.data], { type: record.type || "application/octet-stream" });
@@ -782,7 +830,7 @@ async function trigger3DFileDownload(quoteId, storedFile, fileName) {
         return;
     }
 
-    // 4. Current session fallback
+    // 5. Current session fallback
     if (currentUploadedFile && currentUploadedFile.name === fileName) {
         const url = URL.createObjectURL(currentUploadedFile);
         const a = document.createElement("a");
@@ -796,8 +844,8 @@ async function trigger3DFileDownload(quoteId, storedFile, fileName) {
     }
 
     alert(
-        `ℹ️ Note: The file "${fileName}" was submitted in a previous session before 3D file caching was activated on this browser.\n\n` +
-        `For all new quotes, the 3D file is saved and downloadable directly here. Customers are also instructed to attach their 3D model in your WhatsApp conversation.`
+        `ℹ️ Note: The file "${fileName}" was submitted from another browser session.\n\n` +
+        `Please check your WhatsApp conversation with the customer to download their attached 3D file.`
     );
 }
 
