@@ -24,6 +24,7 @@ const CURRENCY_SYMBOLS = {
 const DEFAULT_SETTINGS = {
     currency: "EUR",
     whatsapp_business_phone: "",
+    google_sheet_url: "https://script.google.com/macros/s/AKfycbxn9h194jVDKHl7W-CCUQEv_43Fg_j9HRcYUS39RLJ8Mq5WFAROU98BOdHHzFfT6DNHsA/exec",
     spool_price: 22,
     spool_weight: 1000,
     electricity_hourly_rate: 0.05,
@@ -587,7 +588,21 @@ async function submitCustomerQuote() {
     };
 
     saveQuoteLocally(quoteRecord);
-    statusMsg.textContent = `✅ Quote ${quoteId} created! Opening WhatsApp...`;
+
+    // Sync to Google Sheet Cloud Database (visible across all devices!)
+    const sheetUrl = activeSettings.google_sheet_url || "https://script.google.com/macros/s/AKfycbxn9h194jVDKHl7W-CCUQEv_43Fg_j9HRcYUS39RLJ8Mq5WFAROU98BOdHHzFfT6DNHsA/exec";
+    if (sheetUrl) {
+        try {
+            fetch(sheetUrl, {
+                method: "POST",
+                mode: "no-cors",
+                headers: { "Content-Type": "text/plain" },
+                body: JSON.stringify(quoteRecord)
+            }).catch((err) => console.warn("Google Sheet sync notice:", err));
+        } catch (e) {}
+    }
+
+    statusMsg.textContent = `✅ Quote ${quoteId} created & saved to cloud! Opening WhatsApp...`;
     statusMsg.style.color = "var(--accent)";
     window.open(waLink, "_blank");
     submitBtn.disabled = false;
@@ -727,6 +742,8 @@ async function handleAdminChangePassword() {
 function populateAdminSettingsForm() {
     document.getElementById("adminCurrency").value = activeSettings.currency || "EUR";
     document.getElementById("adminWhatsAppBusiness").value = activeSettings.whatsapp_business_phone || "";
+    const sheetInput = document.getElementById("adminGoogleSheetUrl");
+    if (sheetInput) sheetInput.value = activeSettings.google_sheet_url || "";
     document.getElementById("adminSpoolPrice").value = activeSettings.spool_price;
     document.getElementById("adminSpoolWeight").value = activeSettings.spool_weight;
     document.getElementById("adminElectricityHourlyRate").value = activeSettings.electricity_hourly_rate ?? 0.05;
@@ -743,9 +760,11 @@ async function handleSaveAdminSettings() {
     statusMsg.textContent = "Saving parameters...";
     statusMsg.style.color = "var(--text-soft)";
 
+    const sheetInput = document.getElementById("adminGoogleSheetUrl");
     const payload = {
         currency: document.getElementById("adminCurrency").value,
         whatsapp_business_phone: document.getElementById("adminWhatsAppBusiness").value.trim(),
+        google_sheet_url: sheetInput ? sheetInput.value.trim() : (activeSettings.google_sheet_url || ""),
         spool_price: parseFloat(document.getElementById("adminSpoolPrice").value) || 22,
         spool_weight: parseFloat(document.getElementById("adminSpoolWeight").value) || 1000,
         electricity_hourly_rate: parseFloat(document.getElementById("adminElectricityHourlyRate").value) ?? 0.05,
@@ -856,22 +875,53 @@ async function loadAdminQuotes() {
 
     let quotes = [];
 
+    // 1. Fetch from Google Sheet Cloud Database (All devices synced!)
+    const sheetUrl = activeSettings.google_sheet_url || "https://script.google.com/macros/s/AKfycbxn9h194jVDKHl7W-CCUQEv_43Fg_j9HRcYUS39RLJ8Mq5WFAROU98BOdHHzFfT6DNHsA/exec";
+    if (sheetUrl) {
+        try {
+            const sheetRes = await safeFetchJson(sheetUrl);
+            if (sheetRes.ok && sheetRes.data && sheetRes.data.quotes && sheetRes.data.quotes.length > 0) {
+                const sheetQuotes = sheetRes.data.quotes.map((r, idx) => ({
+                    id: r["Quote ID"] || r.id || `Q-CLOUD-${idx + 1}`,
+                    created_at: r["Date"] || r.created_at || new Date().toISOString(),
+                    customer_name: r["Customer Name"] || r.customer_name || "Customer",
+                    whatsapp: String(r["WhatsApp"] || r.whatsapp || ""),
+                    file_name: r["3D Model"] || r.file_name || "model.obj",
+                    stored_file: r.stored_file || "",
+                    material: r["Material"] || r.material || "PLA",
+                    infill: String(r["Infill"] ? (typeof r["Infill"] === "number" ? Math.round(r["Infill"] * 100) + "%" : r["Infill"]) : "20%"),
+                    weight_g: r["Weight (g)"] || r.weight_g || "0",
+                    print_time_minutes: r["Print Time (min)"] || r.print_time_minutes || "0",
+                    selling_price: r["Selling Price"] || r.selling_price || "0",
+                    status: r["Status"] || r.status || "Pending",
+                    notes: r["Notes"] || r.notes || ""
+                }));
+                quotes = [...sheetQuotes];
+            }
+        } catch (e) {
+            console.warn("Could not fetch quotes from Google Sheet:", e);
+        }
+    }
+
+    // 2. Fetch from backend API if online
     if (adminToken && !adminToken.startsWith("local-admin-token-")) {
         const res = await safeFetchJson("/api/admin/quotes", {
             headers: { Authorization: `Bearer ${adminToken}` }
         });
         if (res.ok && res.data && res.data.quotes) {
-            quotes = res.data.quotes;
+            const existingIds = new Set(quotes.map(q => q.id));
+            const serverQuotes = res.data.quotes.filter(q => !existingIds.has(q.id));
+            quotes = [...serverQuotes, ...quotes];
         }
     }
 
-    if (quotes.length === 0) {
-        try {
-            quotes = JSON.parse(localStorage.getItem("printprice-quotes") || "[]");
-        } catch (e) {
-            quotes = [];
-        }
-    }
+    // 3. Merge local browser quotes
+    try {
+        const localList = JSON.parse(localStorage.getItem("printprice-quotes") || "[]");
+        const existingIds = new Set(quotes.map(q => q.id));
+        const unmerged = localList.filter(q => !existingIds.has(q.id));
+        quotes = [...quotes, ...unmerged];
+    } catch (e) {}
 
     if (quotes.length === 0) {
         tbody.innerHTML = `<tr><td colspan="10" class="table-empty">No customer quotes found in quotesdb.csv yet.</td></tr>`;
