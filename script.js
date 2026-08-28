@@ -43,6 +43,71 @@ let currentCalculatedQuote = null;
 let isServerOnline = false;
 
 // =========================================================================
+// INDEXEDDB HELPER FOR 3D FILE STORAGE (GITHUB PAGES / LOCAL FALLBACK)
+// =========================================================================
+
+const IDB_NAME = "PrintPrice3DDB";
+const IDB_STORE = "model_files";
+
+function openIndexedDB() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open(IDB_NAME, 1);
+        req.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains(IDB_STORE)) {
+                db.createObjectStore(IDB_STORE, { keyPath: "id" });
+            }
+        };
+        req.onsuccess = (e) => resolve(e.target.result);
+        req.onerror = (e) => reject(e.target.error);
+    });
+}
+
+async function save3DFileLocally(quoteId, file) {
+    try {
+        const db = await openIndexedDB();
+        const tx = db.transaction(IDB_STORE, "readwrite");
+        const store = tx.objectStore(IDB_STORE);
+        const buffer = await file.arrayBuffer();
+        store.put({
+            id: quoteId,
+            name: file.name,
+            data: buffer,
+            type: file.type || "application/octet-stream"
+        });
+        return new Promise((resolve) => {
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+        });
+    } catch (e) {
+        console.error("IndexedDB save error:", e);
+    }
+}
+
+async function get3DFileLocally(quoteId) {
+    try {
+        const db = await openIndexedDB();
+        const tx = db.transaction(IDB_STORE, "readonly");
+        const store = tx.objectStore(IDB_STORE);
+        return new Promise((resolve) => {
+            const req = store.get(quoteId);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => resolve(null);
+        });
+    } catch (e) {
+        return null;
+    }
+}
+
+async function delete3DFileLocally(quoteId) {
+    try {
+        const db = await openIndexedDB();
+        const tx = db.transaction(IDB_STORE, "readwrite");
+        tx.objectStore(IDB_STORE).delete(quoteId);
+    } catch (e) {}
+}
+
+// =========================================================================
 // INITIALIZATION
 // =========================================================================
 
@@ -345,7 +410,6 @@ function calculateCustomerQuote() {
     const weightGrams = est.weightGrams;
     const printHours = est.printTimeMinutes / 60;
 
-    // Simple hourly electricity rate
     const elecRate = activeSettings.electricity_hourly_rate ?? 0.05;
 
     const filamentCostPerPrint = (weightGrams / activeSettings.spool_weight) * activeSettings.spool_price;
@@ -425,7 +489,10 @@ async function submitCustomerQuote() {
 
     const waLink = businessPhone ? `https://wa.me/${businessPhone}?text=${waText}` : `https://wa.me/?text=${waText}`;
 
-    // Try submitting to backend API if available
+    // 1. Always save 3D file locally in IndexedDB as well for instant download
+    await save3DFileLocally(quoteId, currentUploadedFile);
+
+    // 2. Try submitting to backend API if available
     try {
         const formData = new FormData();
         formData.append("file", currentUploadedFile);
@@ -456,7 +523,7 @@ async function submitCustomerQuote() {
             return;
         }
     } catch (e) {
-        // Fallback to local storage below
+        // Fallback to local storage
     }
 
     // Static Hosting / LocalStorage fallback
@@ -673,6 +740,30 @@ async function handleSaveAdminSettings() {
     calculateManual();
 }
 
+// Download .obj/.stl file helper
+async function trigger3DFileDownload(quoteId, storedFile, fileName) {
+    if (storedFile && isServerOnline) {
+        window.location.href = `/api/uploads/${encodeURIComponent(storedFile)}`;
+        return;
+    }
+
+    // Retrieve from IndexedDB
+    const record = await get3DFileLocally(quoteId);
+    if (record && record.data) {
+        const blob = new Blob([record.data], { type: record.type || "application/octet-stream" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = fileName || record.name || "model.obj";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    } else {
+        alert(`Sorry, the 3D file "${fileName}" was not found in browser storage.`);
+    }
+}
+
 // Load quotes for Admin Table
 async function loadAdminQuotes() {
     const tbody = document.getElementById("quotesTableBody");
@@ -721,11 +812,9 @@ async function loadAdminQuotes() {
                 </a>
             </td>
             <td>
-                ${q.stored_file ? `
-                    <a class="download-link" href="/api/uploads/${encodeURIComponent(q.stored_file)}" download title="Download 3D Model">
-                        <span>📦 ${escapeHtml(q.file_name)}</span>
-                    </a>
-                ` : `<span>📦 ${escapeHtml(q.file_name)}</span>`}
+                <button class="download-link text-button" data-download-id="${q.id}" data-stored-file="${escapeHtml(q.stored_file || '')}" data-filename="${escapeHtml(q.file_name)}" type="button" title="Download 3D Model">
+                    <span>📦 📥 ${escapeHtml(q.file_name)}</span>
+                </button>
             </td>
             <td>${escapeHtml(q.material)} (${escapeHtml(q.infill)})</td>
             <td>~${escapeHtml(q.weight_g)}g &bull; ~${timeStr}</td>
@@ -744,6 +833,17 @@ async function loadAdminQuotes() {
             </td>
         `;
         tbody.appendChild(tr);
+    });
+
+    // Wire 3D file download buttons
+    tbody.querySelectorAll("[data-download-id]").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            const qId = btn.dataset.downloadId;
+            const storedFile = btn.dataset.storedFile;
+            const fileName = btn.dataset.filename;
+            trigger3DFileDownload(qId, storedFile, fileName);
+        });
     });
 
     tbody.querySelectorAll(".status-select").forEach((sel) => {
@@ -793,6 +893,8 @@ async function deleteQuote(id) {
             headers: { Authorization: `Bearer ${adminToken}` }
         });
     }
+
+    await delete3DFileLocally(id);
 
     try {
         let list = JSON.parse(localStorage.getItem("printprice-quotes") || "[]");
