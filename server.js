@@ -420,10 +420,12 @@ app.post("/api/quotes", upload.single("file"), (req, res) => {
             `👤 *Name:* ${quoteRecord.customer_name}\n` +
             `📦 *Model:* ${quoteRecord.file_name}\n` +
             `🧱 *Material:* ${quoteRecord.material} (${quoteRecord.infill} infill)\n` +
-            `⚖️ *Weight:* ${quoteRecord.weight_g}g\n` +
-            `⏱️ *Print Time:* ${timeStr}\n` +
+            `⚖️ *Est. Weight:* ~${quoteRecord.weight_g}g\n` +
+            `⏱️ *Est. Print Time:* ~${timeStr}\n` +
             `🔢 *Quantity:* ${quoteRecord.quantity}\n` +
             `💰 *Estimated Price:* ${settings.currency || "€"}${Number(quoteRecord.selling_price).toFixed(2)}\n\n` +
+            `🚚 *Note:* Delivery charges not included.\n` +
+            `⚖️ *Note:* Weight and print time are estimates.\n\n` +
             `Could you please review my print request? Thank you!`
         );
 

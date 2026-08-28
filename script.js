@@ -4,6 +4,8 @@
  * PrintPrice - 3D Print Cost Calculator & Instant 3D Quoting Engine
  * Original code & base concept by @anadskman (https://github.com/anadskman)
  */
+
+// =========================================================================
 // GLOBAL STATE & CONSTANTS
 // =========================================================================
 
@@ -19,19 +21,7 @@ const CURRENCY_SYMBOLS = {
     CHF: "Fr"
 };
 
-const CURRENCY_LOCALES = {
-    EUR: "en-IE",
-    USD: "en-US",
-    GBP: "en-GB",
-    INR: "en-IN",
-    CAD: "en-CA",
-    AUD: "en-AU",
-    JPY: "ja-JP",
-    CNY: "zh-CN",
-    CHF: "de-CH"
-};
-
-let activeSettings = {
+const DEFAULT_SETTINGS = {
     currency: "EUR",
     whatsapp_business_phone: "",
     spool_price: 22,
@@ -46,10 +36,12 @@ let activeSettings = {
     markup: 30
 };
 
+let activeSettings = { ...DEFAULT_SETTINGS };
 let adminToken = sessionStorage.getItem("printprice-admin-token") || localStorage.getItem("printprice-admin-token");
 let current3DMetrics = null;
 let currentUploadedFile = null;
 let currentCalculatedQuote = null;
+let isServerOnline = false;
 
 // =========================================================================
 // INITIALIZATION
@@ -66,10 +58,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     initAdminEvents();
     initManualCalculator();
 
-    // Fetch live settings from server
+    // Check backend status & load settings
     await loadSettings();
 
-    // If admin token exists, check and load dashboard
+    // If admin token exists, check session
     if (adminToken) {
         checkAdminSession();
     }
@@ -96,30 +88,51 @@ function updateCurrencyUnits(curr = activeSettings.currency) {
     });
 }
 
-// Load public settings from backend
-async function loadSettings() {
+// Helper: Safely parse JSON from fetch response
+async function safeFetchJson(url, options = {}) {
     try {
-        const res = await fetch("/api/settings");
-        if (res.ok) {
-            const data = await res.json();
-            activeSettings = { ...activeSettings, ...data };
-            if (data.currency) {
-                const currSelect = document.getElementById("currency");
-                if (currSelect) currSelect.value = data.currency;
-                updateCurrencyUnits(data.currency);
-            }
-            // Populate admin settings form if in view
-            populateAdminSettingsForm();
-            // Recalculate customer quote if model loaded
-            if (current3DMetrics) {
-                calculateCustomerQuote();
-            }
-            // Recalculate manual calculator
-            calculateManual();
+        const res = await fetch(url, options);
+        const text = await res.text();
+        try {
+            const data = JSON.parse(text);
+            return { ok: res.ok, status: res.status, data: data };
+        } catch (e) {
+            // Response was not JSON (e.g. 404 HTML from GitHub Pages)
+            return { ok: false, status: res.status, isHtml: true, data: null };
         }
-    } catch (err) {
-        console.error("Could not fetch settings from server:", err);
+    } catch (networkErr) {
+        return { ok: false, status: 0, networkError: true, data: null };
     }
+}
+
+// Load public settings (from Server or LocalStorage fallback)
+async function loadSettings() {
+    // Try Server API first
+    const res = await safeFetchJson("/api/settings");
+    if (res.ok && res.data && !res.isHtml) {
+        isServerOnline = true;
+        activeSettings = { ...activeSettings, ...res.data };
+    } else {
+        // Static Hosting / GitHub Pages fallback
+        isServerOnline = false;
+        const saved = localStorage.getItem("printprice-settings");
+        if (saved) {
+            try {
+                activeSettings = { ...DEFAULT_SETTINGS, ...JSON.parse(saved) };
+            } catch (e) {
+                activeSettings = { ...DEFAULT_SETTINGS };
+            }
+        }
+    }
+
+    if (activeSettings.currency) {
+        const currSelect = document.getElementById("currency");
+        if (currSelect) currSelect.value = activeSettings.currency;
+        updateCurrencyUnits(activeSettings.currency);
+    }
+    populateAdminSettingsForm();
+    if (current3DMetrics) calculateCustomerQuote();
+    calculateManual();
 }
 
 // =========================================================================
@@ -222,7 +235,6 @@ function initDropzone() {
     const dropzone = document.getElementById("fileDropzone");
     const fileInput = document.getElementById("fileInput");
     const dropzoneLoaded = document.getElementById("dropzoneLoaded");
-    const dropzoneContent = dropzone.querySelector(".dropzone-content");
     const loadedFilename = document.getElementById("loadedFilename");
     const changeFileBtn = document.getElementById("changeFileBtn");
 
@@ -369,8 +381,8 @@ function calculateCustomerQuote() {
     // Update UI
     document.getElementById("custQuotePrice").textContent = formatCurrency(totalSellingPrice);
     document.getElementById("custPerItemPrice").textContent = `${formatCurrency(sellingPricePerPrint)} each`;
-    document.getElementById("custEstWeight").textContent = `${weightGrams * quantity} g (${weightGrams}g/ea)`;
-    document.getElementById("custEstTime").textContent = est.formattedTime;
+    document.getElementById("custEstWeight").textContent = `~${weightGrams * quantity} g (${weightGrams}g/ea)`;
+    document.getElementById("custEstTime").textContent = `~${est.formattedTime}`;
 }
 
 async function submitCustomerQuote() {
@@ -393,10 +405,32 @@ async function submitCustomerQuote() {
         return;
     }
 
-    statusMsg.textContent = "Uploading model and generating quote...";
+    statusMsg.textContent = "Generating quote...";
     statusMsg.style.color = "var(--text-soft)";
     submitBtn.disabled = true;
 
+    const quoteId = "Q-" + Date.now().toString(36).toUpperCase();
+    const businessPhone = (activeSettings.whatsapp_business_phone || "").replace(/[^0-9]/g, "");
+
+    // WhatsApp message with explicit disclaimers: delivery charges not included, weight is an estimate
+    const waText = encodeURIComponent(
+        `👋 Hello! I just requested a 3D print quote on PrintPrice.\n\n` +
+        `📋 *Quote ID:* ${quoteId}\n` +
+        `👤 *Name:* ${custName || "Customer"}\n` +
+        `📦 *Model:* ${currentUploadedFile.name}\n` +
+        `🧱 *Material:* ${currentCalculatedQuote.material} (${currentCalculatedQuote.infill} infill)\n` +
+        `⚖️ *Est. Weight:* ~${currentCalculatedQuote.weightGrams * currentCalculatedQuote.quantity}g\n` +
+        `⏱️ *Est. Print Time:* ~${currentCalculatedQuote.formattedTime}\n` +
+        `🔢 *Quantity:* ${currentCalculatedQuote.quantity}\n` +
+        `💰 *Estimated Price:* ${formatCurrency(currentCalculatedQuote.totalPrice)}\n\n` +
+        `🚚 *Note:* Delivery charges not included.\n` +
+        `⚖️ *Note:* Weight and print time are estimates.\n\n` +
+        `Could you please review my print request? Thank you!`
+    );
+
+    const waLink = businessPhone ? `https://wa.me/${businessPhone}?text=${waText}` : `https://wa.me/?text=${waText}`;
+
+    // Try submitting to backend API if available
     try {
         const formData = new FormData();
         formData.append("file", currentUploadedFile);
@@ -418,29 +452,56 @@ async function submitCustomerQuote() {
             body: formData
         });
 
-        const data = await res.json();
-        if (!res.ok) {
-            throw new Error(data.error || "Failed to submit quote");
+        if (res.ok) {
+            const data = await res.json();
+            statusMsg.textContent = `✅ Quote ${data.quote.id} created & saved to quotesdb.csv! Opening WhatsApp...`;
+            statusMsg.style.color = "var(--accent)";
+            window.open(data.whatsapp_url || waLink, "_blank");
+            submitBtn.disabled = false;
+            return;
         }
-
-        statusMsg.textContent = `✅ Quote ${data.quote.id} created & saved to quotesdb.csv! Opening WhatsApp...`;
-        statusMsg.style.color = "var(--accent)";
-
-        // Open WhatsApp in new tab
-        if (data.whatsapp_url) {
-            window.open(data.whatsapp_url, "_blank");
-        }
-    } catch (err) {
-        console.error("Submission error:", err);
-        statusMsg.textContent = `Error: ${err.message}`;
-        statusMsg.style.color = "var(--error)";
-    } finally {
-        submitBtn.disabled = false;
+    } catch (e) {
+        // Fallback to local storage below
     }
+
+    // Static Hosting / LocalStorage fallback
+    const quoteRecord = {
+        id: quoteId,
+        customer_name: custName || "Customer",
+        whatsapp: custWhatsApp,
+        file_name: currentUploadedFile.name,
+        stored_file: "",
+        material: currentCalculatedQuote.material,
+        infill: currentCalculatedQuote.infill,
+        dimensions_mm: `${current3DMetrics.dimensions.x}x${current3DMetrics.dimensions.y}x${current3DMetrics.dimensions.z}`,
+        volume_cm3: current3DMetrics.volumeCm3.toFixed(2),
+        weight_g: currentCalculatedQuote.weightGrams,
+        print_time_minutes: currentCalculatedQuote.printTimeMinutes,
+        quantity: currentCalculatedQuote.quantity,
+        total_cost: currentCalculatedQuote.totalCost.toFixed(2),
+        selling_price: currentCalculatedQuote.totalPrice.toFixed(2),
+        status: "Pending",
+        notes: custNotes,
+        created_at: new Date().toISOString()
+    };
+
+    saveQuoteLocally(quoteRecord);
+    statusMsg.textContent = `✅ Quote ${quoteId} created! Opening WhatsApp...`;
+    statusMsg.style.color = "var(--accent)";
+    window.open(waLink, "_blank");
+    submitBtn.disabled = false;
+}
+
+function saveQuoteLocally(quote) {
+    const raw = localStorage.getItem("printprice-quotes") || "[]";
+    let list = [];
+    try { list = JSON.parse(raw); } catch (e) { list = []; }
+    list.unshift(quote);
+    localStorage.setItem("printprice-quotes", JSON.stringify(list));
 }
 
 // =========================================================================
-// ADMIN AUTHENTICATION & DASHBOARD
+// ADMIN AUTHENTICATION & DASHBOARD (Universal Hybrid Engine)
 // =========================================================================
 
 function initAdminEvents() {
@@ -449,12 +510,16 @@ function initAdminEvents() {
     const changePassBtn = document.getElementById("adminChangePassBtn");
     const saveSettingsBtn = document.getElementById("saveAdminSettingsBtn");
     const refreshQuotesBtn = document.getElementById("refreshQuotesBtn");
+    const downloadQuotesBtn = document.getElementById("downloadQuotesCsvBtn");
+    const downloadHistoryBtn = document.getElementById("downloadHistoryCsvBtn");
 
     loginForm.addEventListener("submit", handleAdminLogin);
     logoutBtn.addEventListener("click", handleAdminLogout);
     changePassBtn.addEventListener("click", handleAdminChangePassword);
     saveSettingsBtn.addEventListener("click", handleSaveAdminSettings);
     if (refreshQuotesBtn) refreshQuotesBtn.addEventListener("click", loadAdminQuotes);
+    if (downloadQuotesBtn) downloadQuotesBtn.addEventListener("click", handleDownloadQuotesCsv);
+    if (downloadHistoryBtn) downloadHistoryBtn.addEventListener("click", handleDownloadHistoryCsv);
 }
 
 async function handleAdminLogin(e) {
@@ -465,46 +530,55 @@ async function handleAdminLogin(e) {
 
     errorMsg.textContent = "";
 
-    try {
-        const res = await fetch("/api/admin/login", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                username: usernameInput.value.trim(),
-                password: passwordInput.value
-            })
-        });
+    const user = usernameInput.value.trim();
+    const pass = passwordInput.value;
 
-        const data = await res.json();
-        if (!res.ok) {
-            throw new Error(data.error || "Login failed");
-        }
+    // 1. Try Server API Login
+    const res = await safeFetchJson("/api/admin/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: user, password: pass })
+    });
 
-        adminToken = data.token;
+    if (res.ok && res.data && res.data.success) {
+        adminToken = res.data.token;
         sessionStorage.setItem("printprice-admin-token", adminToken);
-
-        showAdminDashboard(data.user.username);
+        showAdminDashboard(res.data.user.username);
         loadAdminQuotes();
         loadAdminHistory();
-    } catch (err) {
-        errorMsg.textContent = err.message;
+        return;
+    }
+
+    // 2. Client-side / Static Fallback (GitHub Pages)
+    const localPass = localStorage.getItem("printprice-admin-pass") || "admin123";
+    if (user.toLowerCase() === "admin" && pass === localPass) {
+        adminToken = "local-admin-token-" + Date.now();
+        sessionStorage.setItem("printprice-admin-token", adminToken);
+        showAdminDashboard("admin");
+        loadAdminQuotes();
+        loadAdminHistory();
+    } else {
+        errorMsg.textContent = (res.data && res.data.error) ? res.data.error : "Invalid credentials. (Default: admin / admin123)";
     }
 }
 
 async function checkAdminSession() {
-    try {
-        const res = await fetch("/api/admin/check", {
-            headers: { Authorization: `Bearer ${adminToken}` }
-        });
-        if (res.ok) {
-            const data = await res.json();
-            showAdminDashboard(data.user.username);
-            loadAdminQuotes();
-            loadAdminHistory();
-        } else {
-            handleAdminLogout();
-        }
-    } catch (err) {
+    if (adminToken.startsWith("local-admin-token-")) {
+        showAdminDashboard("admin");
+        loadAdminQuotes();
+        loadAdminHistory();
+        return;
+    }
+
+    const res = await safeFetchJson("/api/admin/check", {
+        headers: { Authorization: `Bearer ${adminToken}` }
+    });
+
+    if (res.ok && res.data && res.data.valid) {
+        showAdminDashboard(res.data.user.username);
+        loadAdminQuotes();
+        loadAdminHistory();
+    } else {
         handleAdminLogout();
     }
 }
@@ -532,8 +606,9 @@ async function handleAdminChangePassword() {
         return;
     }
 
-    try {
-        const res = await fetch("/api/admin/change-password", {
+    // Try server update
+    if (adminToken && !adminToken.startsWith("local-admin-token-")) {
+        const res = await safeFetchJson("/api/admin/change-password", {
             method: "PUT",
             headers: {
                 "Content-Type": "application/json",
@@ -541,15 +616,15 @@ async function handleAdminChangePassword() {
             },
             body: JSON.stringify({ newPassword: newPass })
         });
-        const data = await res.json();
         if (res.ok) {
             alert("Password successfully updated in accountsdb.csv!");
-        } else {
-            alert(`Error: ${data.error}`);
+            return;
         }
-    } catch (err) {
-        alert(`Error updating password: ${err.message}`);
     }
+
+    // LocalStorage fallback
+    localStorage.setItem("printprice-admin-pass", newPass);
+    alert("Admin password updated successfully!");
 }
 
 function populateAdminSettingsForm() {
@@ -569,7 +644,7 @@ function populateAdminSettingsForm() {
 
 async function handleSaveAdminSettings() {
     const statusMsg = document.getElementById("adminSettingsStatus");
-    statusMsg.textContent = "Saving parameters to settings.csv...";
+    statusMsg.textContent = "Saving parameters...";
     statusMsg.style.color = "var(--text-soft)";
 
     const payload = {
@@ -587,8 +662,13 @@ async function handleSaveAdminSettings() {
         markup: parseFloat(document.getElementById("adminMarkup").value) || 30
     };
 
-    try {
-        const res = await fetch("/api/admin/settings", {
+    activeSettings = { ...activeSettings, ...payload };
+    localStorage.setItem("printprice-settings", JSON.stringify(activeSettings));
+    updateCurrencyUnits(activeSettings.currency);
+
+    // Try server update
+    if (adminToken && !adminToken.startsWith("local-admin-token-")) {
+        await safeFetchJson("/api/admin/settings", {
             method: "PUT",
             headers: {
                 "Content-Type": "application/json",
@@ -596,22 +676,13 @@ async function handleSaveAdminSettings() {
             },
             body: JSON.stringify(payload)
         });
-
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Failed to save settings");
-
-        activeSettings = { ...activeSettings, ...payload };
-        updateCurrencyUnits(activeSettings.currency);
-        statusMsg.textContent = "✅ Parameters successfully saved to data/settings.csv!";
-        statusMsg.style.color = "var(--accent)";
-
-        // Recalculate customer quote if in progress
-        if (current3DMetrics) calculateCustomerQuote();
-        calculateManual();
-    } catch (err) {
-        statusMsg.textContent = `Error: ${err.message}`;
-        statusMsg.style.color = "var(--error)";
     }
+
+    statusMsg.textContent = "✅ Parameters successfully saved and applied to all quotes!";
+    statusMsg.style.color = "var(--accent)";
+
+    if (current3DMetrics) calculateCustomerQuote();
+    calculateManual();
 }
 
 // Load quotes for Admin Table
@@ -619,87 +690,97 @@ async function loadAdminQuotes() {
     const tbody = document.getElementById("quotesTableBody");
     tbody.innerHTML = `<tr><td colspan="10" class="table-empty">Loading customer quotes...</td></tr>`;
 
-    try {
-        const res = await fetch("/api/admin/quotes", {
+    let quotes = [];
+
+    // Try server quotes
+    if (adminToken && !adminToken.startsWith("local-admin-token-")) {
+        const res = await safeFetchJson("/api/admin/quotes", {
             headers: { Authorization: `Bearer ${adminToken}` }
         });
-        const data = await res.json();
-
-        if (!data.quotes || data.quotes.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="10" class="table-empty">No customer quotes found in quotesdb.csv yet.</td></tr>`;
-            return;
+        if (res.ok && res.data && res.data.quotes) {
+            quotes = res.data.quotes;
         }
-
-        tbody.innerHTML = "";
-        data.quotes.forEach((q) => {
-            const tr = document.createElement("tr");
-
-            const hours = Math.floor(Number(q.print_time_minutes || 0) / 60);
-            const mins = Number(q.print_time_minutes || 0) % 60;
-            const timeStr = `${hours}h ${mins}m`;
-            const dateStr = q.created_at ? new Date(q.created_at).toLocaleDateString() : "-";
-            const cleanPhone = (q.whatsapp || "").replace(/[^0-9+]/g, "");
-
-            tr.innerHTML = `
-                <td><strong>${escapeHtml(q.id)}</strong></td>
-                <td><small>${dateStr}</small></td>
-                <td>${escapeHtml(q.customer_name)}</td>
-                <td>
-                    <a class="wa-link" href="https://wa.me/${cleanPhone.replace("+", "")}" target="_blank" title="Chat on WhatsApp">
-                        <span>💬 ${escapeHtml(q.whatsapp)}</span>
-                    </a>
-                </td>
-                <td>
-                    ${q.stored_file ? `
-                        <a class="download-link" href="/api/uploads/${encodeURIComponent(q.stored_file)}" download title="Download 3D Model">
-                            <span>📦 ${escapeHtml(q.file_name)}</span>
-                        </a>
-                    ` : escapeHtml(q.file_name)}
-                </td>
-                <td>${escapeHtml(q.material)} (${escapeHtml(q.infill)})</td>
-                <td>${escapeHtml(q.weight_g)}g &bull; ${timeStr}</td>
-                <td><strong>${formatCurrency(q.selling_price)}</strong></td>
-                <td>
-                    <select class="status-select" data-quote-id="${q.id}">
-                        <option value="Pending" ${q.status === "Pending" ? "selected" : ""}>Pending</option>
-                        <option value="Approved" ${q.status === "Approved" ? "selected" : ""}>Approved</option>
-                        <option value="Printing" ${q.status === "Printing" ? "selected" : ""}>Printing</option>
-                        <option value="Completed" ${q.status === "Completed" ? "selected" : ""}>Completed</option>
-                        <option value="Rejected" ${q.status === "Rejected" ? "selected" : ""}>Rejected</option>
-                    </select>
-                </td>
-                <td>
-                    <button class="action-btn-danger" data-delete-id="${q.id}" type="button" title="Delete record">🗑️ Delete</button>
-                </td>
-            `;
-            tbody.appendChild(tr);
-        });
-
-        // Event listeners for status changes & delete
-        tbody.querySelectorAll(".status-select").forEach((sel) => {
-            sel.addEventListener("change", async (e) => {
-                const quoteId = e.target.dataset.quoteId;
-                const newStatus = e.target.value;
-                await updateQuoteStatus(quoteId, newStatus);
-            });
-        });
-
-        tbody.querySelectorAll("[data-delete-id]").forEach((btn) => {
-            btn.addEventListener("click", async (e) => {
-                const quoteId = e.currentTarget.dataset.deleteId;
-                if (confirm(`Delete quote ${quoteId} and its uploaded 3D file from disk?`)) {
-                    await deleteQuote(quoteId);
-                }
-            });
-        });
-    } catch (err) {
-        tbody.innerHTML = `<tr><td colspan="10" class="table-empty" style="color: var(--error)">Error loading quotes: ${err.message}</td></tr>`;
     }
+
+    // Fallback to local storage
+    if (quotes.length === 0) {
+        try {
+            quotes = JSON.parse(localStorage.getItem("printprice-quotes") || "[]");
+        } catch (e) {
+            quotes = [];
+        }
+    }
+
+    if (quotes.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="10" class="table-empty">No customer quotes found in quotesdb.csv yet.</td></tr>`;
+        return;
+    }
+
+    tbody.innerHTML = "";
+    quotes.forEach((q) => {
+        const tr = document.createElement("tr");
+        const hours = Math.floor(Number(q.print_time_minutes || 0) / 60);
+        const mins = Number(q.print_time_minutes || 0) % 60;
+        const timeStr = `${hours}h ${mins}m`;
+        const dateStr = q.created_at ? new Date(q.created_at).toLocaleDateString() : "-";
+        const cleanPhone = (q.whatsapp || "").replace(/[^0-9+]/g, "");
+
+        tr.innerHTML = `
+            <td><strong>${escapeHtml(q.id)}</strong></td>
+            <td><small>${dateStr}</small></td>
+            <td>${escapeHtml(q.customer_name)}</td>
+            <td>
+                <a class="wa-link" href="https://wa.me/${cleanPhone.replace("+", "")}" target="_blank" title="Chat on WhatsApp">
+                    <span>💬 ${escapeHtml(q.whatsapp)}</span>
+                </a>
+            </td>
+            <td>
+                ${q.stored_file ? `
+                    <a class="download-link" href="/api/uploads/${encodeURIComponent(q.stored_file)}" download title="Download 3D Model">
+                        <span>📦 ${escapeHtml(q.file_name)}</span>
+                    </a>
+                ` : `<span>📦 ${escapeHtml(q.file_name)}</span>`}
+            </td>
+            <td>${escapeHtml(q.material)} (${escapeHtml(q.infill)})</td>
+            <td>~${escapeHtml(q.weight_g)}g &bull; ~${timeStr}</td>
+            <td><strong>${formatCurrency(q.selling_price)}</strong></td>
+            <td>
+                <select class="status-select" data-quote-id="${q.id}">
+                    <option value="Pending" ${q.status === "Pending" ? "selected" : ""}>Pending</option>
+                    <option value="Approved" ${q.status === "Approved" ? "selected" : ""}>Approved</option>
+                    <option value="Printing" ${q.status === "Printing" ? "selected" : ""}>Printing</option>
+                    <option value="Completed" ${q.status === "Completed" ? "selected" : ""}>Completed</option>
+                    <option value="Rejected" ${q.status === "Rejected" ? "selected" : ""}>Rejected</option>
+                </select>
+            </td>
+            <td>
+                <button class="action-btn-danger" data-delete-id="${q.id}" type="button" title="Delete record">🗑️ Delete</button>
+            </td>
+        `;
+        tbody.appendChild(tr);
+    });
+
+    tbody.querySelectorAll(".status-select").forEach((sel) => {
+        sel.addEventListener("change", async (e) => {
+            const quoteId = e.target.dataset.quoteId;
+            const newStatus = e.target.value;
+            await updateQuoteStatus(quoteId, newStatus);
+        });
+    });
+
+    tbody.querySelectorAll("[data-delete-id]").forEach((btn) => {
+        btn.addEventListener("click", async (e) => {
+            const quoteId = e.currentTarget.dataset.deleteId;
+            if (confirm(`Delete quote ${quoteId}?`)) {
+                await deleteQuote(quoteId);
+            }
+        });
+    });
 }
 
 async function updateQuoteStatus(id, status) {
-    try {
-        await fetch(`/api/admin/quotes/${id}`, {
+    if (adminToken && !adminToken.startsWith("local-admin-token-")) {
+        await safeFetchJson(`/api/admin/quotes/${id}`, {
             method: "PATCH",
             headers: {
                 "Content-Type": "application/json",
@@ -707,23 +788,89 @@ async function updateQuoteStatus(id, status) {
             },
             body: JSON.stringify({ status })
         });
-    } catch (err) {
-        console.error("Error updating quote status:", err);
     }
+
+    // Also update local storage
+    try {
+        let list = JSON.parse(localStorage.getItem("printprice-quotes") || "[]");
+        const idx = list.findIndex((q) => q.id === id);
+        if (idx !== -1) {
+            list[idx].status = status;
+            localStorage.setItem("printprice-quotes", JSON.stringify(list));
+        }
+    } catch (e) {}
 }
 
 async function deleteQuote(id) {
-    try {
-        const res = await fetch(`/api/admin/quotes/${id}`, {
+    if (adminToken && !adminToken.startsWith("local-admin-token-")) {
+        await safeFetchJson(`/api/admin/quotes/${id}`, {
             method: "DELETE",
             headers: { Authorization: `Bearer ${adminToken}` }
         });
-        if (res.ok) {
-            loadAdminQuotes();
-        }
-    } catch (err) {
-        alert("Error deleting quote: " + err.message);
     }
+
+    try {
+        let list = JSON.parse(localStorage.getItem("printprice-quotes") || "[]");
+        list = list.filter((q) => q.id !== id);
+        localStorage.setItem("printprice-quotes", JSON.stringify(list));
+    } catch (e) {}
+
+    loadAdminQuotes();
+}
+
+function handleDownloadQuotesCsv(e) {
+    // If backend is running, default link href works
+    if (isServerOnline) return;
+
+    // Static / Local fallback
+    e.preventDefault();
+    const quotes = JSON.parse(localStorage.getItem("printprice-quotes") || "[]");
+    const headers = [
+        "id", "customer_name", "whatsapp", "file_name", "material", "infill",
+        "dimensions_mm", "volume_cm3", "weight_g", "print_time_minutes",
+        "quantity", "total_cost", "selling_price", "status", "notes", "created_at"
+    ];
+
+    const csvRows = [headers.join(",")];
+    quotes.forEach((q) => {
+        const row = headers.map((h) => `"${String(q[h] || "").replace(/"/g, '""')}"`);
+        csvRows.push(row.join(","));
+    });
+
+    const blob = new Blob([csvRows.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "quotesdb.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function handleDownloadHistoryCsv(e) {
+    if (isServerOnline) return;
+
+    e.preventDefault();
+    const history = JSON.parse(localStorage.getItem("printprice-history") || "[]");
+    const headers = [
+        "id", "print_name", "material", "weight", "hours", "minutes", "quantity",
+        "spool_price", "spool_weight", "printer_power", "electricity_price",
+        "printer_price", "printer_lifetime", "labour_minutes", "hourly_rate",
+        "failure_rate", "markup", "total_cost", "selling_price", "profit", "created_at"
+    ];
+
+    const csvRows = [headers.join(",")];
+    history.forEach((h) => {
+        const row = headers.map((k) => `"${String(h[k] || "").replace(/"/g, '""')}"`);
+        csvRows.push(row.join(","));
+    });
+
+    const blob = new Blob([csvRows.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "historydb.csv";
+    a.click();
+    URL.revokeObjectURL(url);
 }
 
 function escapeHtml(str) {
@@ -834,6 +981,7 @@ function calculateManual() {
 async function saveManualToHistory() {
     const statusEl = document.getElementById("calcStatusMessage");
     const payload = {
+        id: "H-" + Date.now().toString(36).toUpperCase(),
         print_name: document.getElementById("printName").value || "Custom Print",
         material: document.getElementById("material").value,
         weight: document.getElementById("weight").value,
@@ -852,11 +1000,20 @@ async function saveManualToHistory() {
         markup: document.getElementById("markup").value,
         total_cost: document.getElementById("totalCost").textContent.replace(/[^0-9.]/g, ""),
         selling_price: document.getElementById("totalPrice").textContent.replace(/[^0-9.]/g, ""),
-        profit: document.getElementById("profit").textContent.replace(/[^0-9.]/g, "")
+        profit: document.getElementById("profit").textContent.replace(/[^0-9.]/g, ""),
+        created_at: new Date().toISOString()
     };
 
+    // Save locally
     try {
-        const res = await fetch("/api/admin/history", {
+        let history = JSON.parse(localStorage.getItem("printprice-history") || "[]");
+        history.unshift(payload);
+        localStorage.setItem("printprice-history", JSON.stringify(history));
+    } catch (e) {}
+
+    // Save to server if available
+    if (adminToken && !adminToken.startsWith("local-admin-token-")) {
+        await safeFetchJson("/api/admin/history", {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -864,63 +1021,68 @@ async function saveManualToHistory() {
             },
             body: JSON.stringify(payload)
         });
-
-        if (res.ok) {
-            statusEl.textContent = "✅ Saved to data/historydb.csv!";
-            statusEl.style.color = "var(--accent)";
-            loadAdminHistory();
-        }
-    } catch (err) {
-        statusEl.textContent = "Error saving history: " + err.message;
-        statusEl.style.color = "var(--error)";
     }
+
+    statusEl.textContent = "✅ Saved to calculation history!";
+    statusEl.style.color = "var(--accent)";
+    loadAdminHistory();
 }
 
 async function loadAdminHistory() {
     const list = document.getElementById("historyList");
     if (!list) return;
 
-    try {
-        const res = await fetch("/api/admin/history", {
+    let history = [];
+
+    // Try server history
+    if (adminToken && !adminToken.startsWith("local-admin-token-")) {
+        const res = await safeFetchJson("/api/admin/history", {
             headers: { Authorization: `Bearer ${adminToken}` }
         });
-        const data = await res.json();
-
-        if (!data.history || data.history.length === 0) {
-            list.innerHTML = `<p class="history-empty">No calculations in historydb.csv yet.</p>`;
-            return;
+        if (res.ok && res.data && res.data.history) {
+            history = res.data.history;
         }
-
-        list.innerHTML = "";
-        data.history.forEach((h) => {
-            const div = document.createElement("div");
-            div.className = "history-item";
-            div.innerHTML = `
-                <div>
-                    <strong>${escapeHtml(h.print_name)}</strong> &bull; ${escapeHtml(h.material)} (${h.weight}g)
-                    <br>
-                    <small>${h.hours}h ${h.minutes}m &bull; ${h.quantity} item(s) &bull; ${new Date(h.created_at).toLocaleDateString()}</small>
-                </div>
-                <div>
-                    <strong>${formatCurrency(h.selling_price)}</strong>
-                </div>
-            `;
-            list.appendChild(div);
-        });
-    } catch (err) {
-        console.error("Error loading history:", err);
     }
+
+    if (history.length === 0) {
+        try {
+            history = JSON.parse(localStorage.getItem("printprice-history") || "[]");
+        } catch (e) {
+            history = [];
+        }
+    }
+
+    if (history.length === 0) {
+        list.innerHTML = `<p class="history-empty">No calculations in history yet.</p>`;
+        return;
+    }
+
+    list.innerHTML = "";
+    history.forEach((h) => {
+        const div = document.createElement("div");
+        div.className = "history-item";
+        div.innerHTML = `
+            <div>
+                <strong>${escapeHtml(h.print_name)}</strong> &bull; ${escapeHtml(h.material)} (${h.weight}g)
+                <br>
+                <small>${h.hours}h ${h.minutes}m &bull; ${h.quantity} item(s) &bull; ${new Date(h.created_at).toLocaleDateString()}</small>
+            </div>
+            <div>
+                <strong>${formatCurrency(h.selling_price)}</strong>
+            </div>
+        `;
+        list.appendChild(div);
+    });
 }
 
 async function clearManualHistory() {
-    if (!confirm("Are you sure you want to clear historydb.csv?")) return;
-    try {
-        const res = await fetch("/api/admin/history/all", {
+    if (!confirm("Are you sure you want to clear history?")) return;
+    localStorage.removeItem("printprice-history");
+    if (adminToken && !adminToken.startsWith("local-admin-token-")) {
+        await safeFetchJson("/api/admin/history/all", {
             method: "DELETE",
             headers: { Authorization: `Bearer ${adminToken}` }
         });
-        if (res.ok) loadAdminHistory();
-    } catch (err) {
-        alert("Error clearing history: " + err.message);
     }
+    loadAdminHistory();
 }

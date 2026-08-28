@@ -1,2 +1,3 @@
 "id","customer_name","whatsapp","file_name","stored_file","material","infill","dimensions_mm","volume_cm3","weight_g","print_time_minutes","quantity","total_cost","selling_price","status","notes","created_at"
 "Q-MTCWUR27","John Doe","+123456789","sample-cube.obj","sample-cube-1787919074430-176734182.obj","PLA","20%","20x20x20","8.00","3.2","45","2","2.50","3.25","Pending","Please print in blue","2026-08-28T12:11:14.431Z"
+"Q-MTCX6ORG","Customer","+91 9121309485","Rock1.obj","Rock1-1787919631323-767126806.obj","PLA","20%","12.2x1.7x12.2","0.01","1","15","1","3.36","4.37","Rejected","","2026-08-28T12:20:31.324Z"
