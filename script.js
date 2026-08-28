@@ -26,8 +26,7 @@ const DEFAULT_SETTINGS = {
     whatsapp_business_phone: "",
     spool_price: 22,
     spool_weight: 1000,
-    printer_power: 120,
-    electricity_price: 0.35,
+    electricity_hourly_rate: 0.05,
     printer_price: 300,
     printer_lifetime: 3000,
     labour_minutes: 15,
@@ -80,9 +79,6 @@ function updateCurrencyUnits(curr = activeSettings.currency) {
     document.querySelectorAll("[data-currency-unit]").forEach((el) => {
         el.textContent = symbol;
     });
-    document.querySelectorAll("[data-electricity-unit]").forEach((el) => {
-        el.textContent = `${symbol}/kWh`;
-    });
     document.querySelectorAll("[data-hourly-unit]").forEach((el) => {
         el.textContent = `${symbol}/hr`;
     });
@@ -97,7 +93,6 @@ async function safeFetchJson(url, options = {}) {
             const data = JSON.parse(text);
             return { ok: res.ok, status: res.status, data: data };
         } catch (e) {
-            // Response was not JSON (e.g. 404 HTML from GitHub Pages)
             return { ok: false, status: res.status, isHtml: true, data: null };
         }
     } catch (networkErr) {
@@ -107,13 +102,11 @@ async function safeFetchJson(url, options = {}) {
 
 // Load public settings (from Server or LocalStorage fallback)
 async function loadSettings() {
-    // Try Server API first
     const res = await safeFetchJson("/api/settings");
     if (res.ok && res.data && !res.isHtml) {
         isServerOnline = true;
         activeSettings = { ...activeSettings, ...res.data };
     } else {
-        // Static Hosting / GitHub Pages fallback
         isServerOnline = false;
         const saved = localStorage.getItem("printprice-settings");
         if (saved) {
@@ -352,8 +345,11 @@ function calculateCustomerQuote() {
     const weightGrams = est.weightGrams;
     const printHours = est.printTimeMinutes / 60;
 
+    // Simple hourly electricity rate
+    const elecRate = activeSettings.electricity_hourly_rate ?? 0.05;
+
     const filamentCostPerPrint = (weightGrams / activeSettings.spool_weight) * activeSettings.spool_price;
-    const electricityCostPerPrint = printHours * (activeSettings.printer_power / 1000) * activeSettings.electricity_price;
+    const electricityCostPerPrint = printHours * elecRate;
     const wearCostPerPrint = printHours * (activeSettings.printer_price / activeSettings.printer_lifetime);
     const labourCostPerPrint = (activeSettings.labour_minutes / 60) * activeSettings.hourly_rate;
 
@@ -412,7 +408,6 @@ async function submitCustomerQuote() {
     const quoteId = "Q-" + Date.now().toString(36).toUpperCase();
     const businessPhone = (activeSettings.whatsapp_business_phone || "").replace(/[^0-9]/g, "");
 
-    // WhatsApp message with explicit disclaimers: delivery charges not included, weight is an estimate
     const waText = encodeURIComponent(
         `👋 Hello! I just requested a 3D print quote on PrintPrice.\n\n` +
         `📋 *Quote ID:* ${quoteId}\n` +
@@ -501,7 +496,7 @@ function saveQuoteLocally(quote) {
 }
 
 // =========================================================================
-// ADMIN AUTHENTICATION & DASHBOARD (Universal Hybrid Engine)
+// ADMIN AUTHENTICATION & DASHBOARD
 // =========================================================================
 
 function initAdminEvents() {
@@ -533,7 +528,6 @@ async function handleAdminLogin(e) {
     const user = usernameInput.value.trim();
     const pass = passwordInput.value;
 
-    // 1. Try Server API Login
     const res = await safeFetchJson("/api/admin/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -549,7 +543,6 @@ async function handleAdminLogin(e) {
         return;
     }
 
-    // 2. Client-side / Static Fallback (GitHub Pages)
     const localPass = localStorage.getItem("printprice-admin-pass") || "admin123";
     if (user.toLowerCase() === "admin" && pass === localPass) {
         adminToken = "local-admin-token-" + Date.now();
@@ -606,7 +599,6 @@ async function handleAdminChangePassword() {
         return;
     }
 
-    // Try server update
     if (adminToken && !adminToken.startsWith("local-admin-token-")) {
         const res = await safeFetchJson("/api/admin/change-password", {
             method: "PUT",
@@ -622,7 +614,6 @@ async function handleAdminChangePassword() {
         }
     }
 
-    // LocalStorage fallback
     localStorage.setItem("printprice-admin-pass", newPass);
     alert("Admin password updated successfully!");
 }
@@ -632,8 +623,7 @@ function populateAdminSettingsForm() {
     document.getElementById("adminWhatsAppBusiness").value = activeSettings.whatsapp_business_phone || "";
     document.getElementById("adminSpoolPrice").value = activeSettings.spool_price;
     document.getElementById("adminSpoolWeight").value = activeSettings.spool_weight;
-    document.getElementById("adminPrinterPower").value = activeSettings.printer_power;
-    document.getElementById("adminElectricityPrice").value = activeSettings.electricity_price;
+    document.getElementById("adminElectricityHourlyRate").value = activeSettings.electricity_hourly_rate ?? 0.05;
     document.getElementById("adminPrinterPrice").value = activeSettings.printer_price;
     document.getElementById("adminPrinterLifetime").value = activeSettings.printer_lifetime;
     document.getElementById("adminLabourMinutes").value = activeSettings.labour_minutes;
@@ -652,8 +642,7 @@ async function handleSaveAdminSettings() {
         whatsapp_business_phone: document.getElementById("adminWhatsAppBusiness").value.trim(),
         spool_price: parseFloat(document.getElementById("adminSpoolPrice").value) || 22,
         spool_weight: parseFloat(document.getElementById("adminSpoolWeight").value) || 1000,
-        printer_power: parseFloat(document.getElementById("adminPrinterPower").value) || 120,
-        electricity_price: parseFloat(document.getElementById("adminElectricityPrice").value) || 0.35,
+        electricity_hourly_rate: parseFloat(document.getElementById("adminElectricityHourlyRate").value) ?? 0.05,
         printer_price: parseFloat(document.getElementById("adminPrinterPrice").value) || 300,
         printer_lifetime: parseFloat(document.getElementById("adminPrinterLifetime").value) || 3000,
         labour_minutes: parseFloat(document.getElementById("adminLabourMinutes").value) || 15,
@@ -666,7 +655,6 @@ async function handleSaveAdminSettings() {
     localStorage.setItem("printprice-settings", JSON.stringify(activeSettings));
     updateCurrencyUnits(activeSettings.currency);
 
-    // Try server update
     if (adminToken && !adminToken.startsWith("local-admin-token-")) {
         await safeFetchJson("/api/admin/settings", {
             method: "PUT",
@@ -692,7 +680,6 @@ async function loadAdminQuotes() {
 
     let quotes = [];
 
-    // Try server quotes
     if (adminToken && !adminToken.startsWith("local-admin-token-")) {
         const res = await safeFetchJson("/api/admin/quotes", {
             headers: { Authorization: `Bearer ${adminToken}` }
@@ -702,7 +689,6 @@ async function loadAdminQuotes() {
         }
     }
 
-    // Fallback to local storage
     if (quotes.length === 0) {
         try {
             quotes = JSON.parse(localStorage.getItem("printprice-quotes") || "[]");
@@ -790,7 +776,6 @@ async function updateQuoteStatus(id, status) {
         });
     }
 
-    // Also update local storage
     try {
         let list = JSON.parse(localStorage.getItem("printprice-quotes") || "[]");
         const idx = list.findIndex((q) => q.id === id);
@@ -819,10 +804,8 @@ async function deleteQuote(id) {
 }
 
 function handleDownloadQuotesCsv(e) {
-    // If backend is running, default link href works
     if (isServerOnline) return;
 
-    // Static / Local fallback
     e.preventDefault();
     const quotes = JSON.parse(localStorage.getItem("printprice-quotes") || "[]");
     const headers = [
@@ -853,7 +836,7 @@ function handleDownloadHistoryCsv(e) {
     const history = JSON.parse(localStorage.getItem("printprice-history") || "[]");
     const headers = [
         "id", "print_name", "material", "weight", "hours", "minutes", "quantity",
-        "spool_price", "spool_weight", "printer_power", "electricity_price",
+        "spool_price", "spool_weight", "electricity_hourly_rate",
         "printer_price", "printer_lifetime", "labour_minutes", "hourly_rate",
         "failure_rate", "markup", "total_cost", "selling_price", "profit", "created_at"
     ];
@@ -913,8 +896,7 @@ function populateManualDefaults() {
     document.getElementById("quantity").value = 1;
     document.getElementById("spoolPrice").value = activeSettings.spool_price;
     document.getElementById("spoolWeight").value = activeSettings.spool_weight;
-    document.getElementById("printerPower").value = activeSettings.printer_power;
-    document.getElementById("electricityPrice").value = activeSettings.electricity_price;
+    document.getElementById("electricityHourlyRate").value = activeSettings.electricity_hourly_rate ?? 0.05;
     document.getElementById("printerPrice").value = activeSettings.printer_price;
     document.getElementById("printerLifetime").value = activeSettings.printer_lifetime;
     document.getElementById("labourMinutes").value = activeSettings.labour_minutes;
@@ -931,8 +913,7 @@ function calculateManual() {
 
     const spoolPrice = parseFloat(document.getElementById("spoolPrice").value) || 0;
     const spoolWeight = parseFloat(document.getElementById("spoolWeight").value) || 1000;
-    const printerPower = parseFloat(document.getElementById("printerPower").value) || 0;
-    const electricityPrice = parseFloat(document.getElementById("electricityPrice").value) || 0;
+    const electricityHourlyRate = parseFloat(document.getElementById("electricityHourlyRate").value) ?? 0.05;
     const printerPrice = parseFloat(document.getElementById("printerPrice").value) || 0;
     const printerLifetime = parseFloat(document.getElementById("printerLifetime").value) || 1;
     const labourMinutes = parseFloat(document.getElementById("labourMinutes").value) || 0;
@@ -944,7 +925,7 @@ function calculateManual() {
 
     // Costs per print
     const filament = (weight / spoolWeight) * spoolPrice;
-    const electricity = totalPrintHours * (printerPower / 1000) * electricityPrice;
+    const electricity = totalPrintHours * electricityHourlyRate;
     const wear = totalPrintHours * (printerPrice / printerLifetime);
     const labour = (labourMinutes / 60) * hourlyRate;
 
@@ -990,8 +971,7 @@ async function saveManualToHistory() {
         quantity: document.getElementById("quantity").value,
         spool_price: document.getElementById("spoolPrice").value,
         spool_weight: document.getElementById("spoolWeight").value,
-        printer_power: document.getElementById("printerPower").value,
-        electricity_price: document.getElementById("electricityPrice").value,
+        electricity_hourly_rate: document.getElementById("electricityHourlyRate").value,
         printer_price: document.getElementById("printerPrice").value,
         printer_lifetime: document.getElementById("printerLifetime").value,
         labour_minutes: document.getElementById("labourMinutes").value,
@@ -1004,14 +984,12 @@ async function saveManualToHistory() {
         created_at: new Date().toISOString()
     };
 
-    // Save locally
     try {
         let history = JSON.parse(localStorage.getItem("printprice-history") || "[]");
         history.unshift(payload);
         localStorage.setItem("printprice-history", JSON.stringify(history));
     } catch (e) {}
 
-    // Save to server if available
     if (adminToken && !adminToken.startsWith("local-admin-token-")) {
         await safeFetchJson("/api/admin/history", {
             method: "POST",
@@ -1034,7 +1012,6 @@ async function loadAdminHistory() {
 
     let history = [];
 
-    // Try server history
     if (adminToken && !adminToken.startsWith("local-admin-token-")) {
         const res = await safeFetchJson("/api/admin/history", {
             headers: { Authorization: `Bearer ${adminToken}` }

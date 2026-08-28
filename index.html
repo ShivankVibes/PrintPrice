@@ -360,19 +360,11 @@
                             <fieldset class="input-container">
                                 <legend class="section-title">Printer & Electricity</legend>
                                 <div class="section-grid">
-                                    <label class="field" for="adminPrinterPower">
-                                        <span class="section-variable">Power Usage</span>
+                                    <label class="field" for="adminElectricityHourlyRate">
+                                        <span class="section-variable">Electricity Cost (per hour)</span>
                                         <span class="input-with-unit">
-                                            <input class="section-value" id="adminPrinterPower" type="number" step="1" value="120" required>
-                                            <span class="input-unit">W</span>
-                                        </span>
-                                    </label>
-
-                                    <label class="field" for="adminElectricityPrice">
-                                        <span class="section-variable">Electricity Price</span>
-                                        <span class="input-with-unit">
-                                            <input class="section-value" id="adminElectricityPrice" type="number" step="0.01" value="0.35" required>
-                                            <span class="input-unit" data-electricity-unit>€/kWh</span>
+                                            <input class="section-value" id="adminElectricityHourlyRate" type="number" step="0.01" value="0.05" required>
+                                            <span class="input-unit" data-hourly-unit>€/hr</span>
                                         </span>
                                     </label>
 
@@ -512,19 +504,11 @@
                                             </span>
                                         </label>
 
-                                        <label class="field" for="printerPower">
-                                            <span class="section-variable">Power usage</span>
+                                        <label class="field" for="electricityHourlyRate">
+                                            <span class="section-variable">Electricity per hour</span>
                                             <span class="input-with-unit">
-                                                <input class="section-value" id="printerPower" name="printerPower" type="number" step="1" value="120" required>
-                                                <span class="input-unit">W</span>
-                                            </span>
-                                        </label>
-
-                                        <label class="field" for="electricityPrice">
-                                            <span class="section-variable">Electricity price</span>
-                                            <span class="input-with-unit">
-                                                <input class="section-value" id="electricityPrice" name="electricityPrice" type="number" step="0.01" value="0.35" required>
-                                                <span class="input-unit" data-electricity-unit>€/kWh</span>
+                                                <input class="section-value" id="electricityHourlyRate" name="electricityHourlyRate" type="number" step="0.01" value="0.05" required>
+                                                <span class="input-unit" data-hourly-unit>€/hr</span>
                                             </span>
                                         </label>
 

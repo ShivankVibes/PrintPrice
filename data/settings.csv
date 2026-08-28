@@ -1,2 +1,2 @@
-"currency","whatsapp_business_phone","spool_price","spool_weight","printer_power","electricity_price","printer_price","printer_lifetime","labour_minutes","hourly_rate","failure_rate","markup","updated_at"
-"EUR","+1234567890","22","1000","120","0.35","300","3000","15","12","10","30","2026-08-28T12:10:45.156Z"
+"currency","whatsapp_business_phone","spool_price","spool_weight","electricity_hourly_rate","printer_price","printer_lifetime","labour_minutes","hourly_rate","failure_rate","markup","updated_at"
+"EUR","+1234567890","22","1000","0.05","300","3000","15","12","10","30","2026-08-28T12:35:00.000Z"
