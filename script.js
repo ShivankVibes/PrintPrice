@@ -483,11 +483,16 @@ async function submitCustomerQuote() {
         `🔢 *Quantity:* ${currentCalculatedQuote.quantity}\n` +
         `💰 *Estimated Price:* ${formatCurrency(currentCalculatedQuote.totalPrice)}\n\n` +
         `🚚 *Note:* Delivery charges not included.\n` +
-        `⚖️ *Note:* Weight and print time are estimates.\n\n` +
+        `⚖️ *Note:* Weight and print time are estimates.\n` +
+        `📎 *Attachment:* (Please attach your "${currentUploadedFile.name}" file to this WhatsApp chat!)\n\n` +
         `Could you please review my print request? Thank you!`
     );
 
     const waLink = businessPhone ? `https://wa.me/${businessPhone}?text=${waText}` : `https://wa.me/?text=${waText}`;
+
+    // Cache in memory
+    window._cached3DFiles = window._cached3DFiles || {};
+    window._cached3DFiles[quoteId] = currentUploadedFile;
 
     // 1. Always save 3D file locally in IndexedDB as well for instant download
     await save3DFileLocally(quoteId, currentUploadedFile);
@@ -742,12 +747,27 @@ async function handleSaveAdminSettings() {
 
 // Download .obj/.stl file helper
 async function trigger3DFileDownload(quoteId, storedFile, fileName) {
+    // 1. Server mode download
     if (storedFile && isServerOnline) {
         window.location.href = `/api/uploads/${encodeURIComponent(storedFile)}`;
         return;
     }
 
-    // Retrieve from IndexedDB
+    // 2. In-memory cache download
+    if (window._cached3DFiles && window._cached3DFiles[quoteId]) {
+        const file = window._cached3DFiles[quoteId];
+        const url = URL.createObjectURL(file);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = fileName || file.name || "model.obj";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        return;
+    }
+
+    // 3. Retrieve from IndexedDB
     const record = await get3DFileLocally(quoteId);
     if (record && record.data) {
         const blob = new Blob([record.data], { type: record.type || "application/octet-stream" });
@@ -759,9 +779,26 @@ async function trigger3DFileDownload(quoteId, storedFile, fileName) {
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-    } else {
-        alert(`Sorry, the 3D file "${fileName}" was not found in browser storage.`);
+        return;
     }
+
+    // 4. Current session fallback
+    if (currentUploadedFile && currentUploadedFile.name === fileName) {
+        const url = URL.createObjectURL(currentUploadedFile);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        return;
+    }
+
+    alert(
+        `ℹ️ Note: The file "${fileName}" was submitted in a previous session before 3D file caching was activated on this browser.\n\n` +
+        `For all new quotes, the 3D file is saved and downloadable directly here. Customers are also instructed to attach their 3D model in your WhatsApp conversation.`
+    );
 }
 
 // Load quotes for Admin Table
